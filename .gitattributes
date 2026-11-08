@@ -1,0 +1,7 @@
+* text=auto
+
+# Unix start script must keep LF, Windows scripts CRLF
+/gradlew        text eol=lf
+*.bat           text eol=crlf
+
+*.jar           binary

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">边写边译</string>
+    <string name="a11y_label">边写边译 · 输入框实时翻译</string>
+    <string name="a11y_description">读取当前输入框中正在输入的文字并实时翻译，可一键替换为译文。不读取密码框，文字仅发送给你所选的翻译源。</string>
+</resources>
