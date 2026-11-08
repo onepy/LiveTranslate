@@ -9,6 +9,7 @@ import org.json.JSONObject
 
 /** Bounded process-memory dictionary. Only explicit word taps call this; opening the panel does not. */
 object WordMeanings {
+    const val PRIVATE_WORD = "隐私内容，不查询释义"
     private data class Key(val word: String, val language: String, val provider: String)
     private val mutex = Mutex()
     private val cache = object : LinkedHashMap<Key, String>(16, 0.75f, true) {
@@ -19,6 +20,8 @@ object WordMeanings {
         "Return only its short dictionary meaning (common senses if ambiguous), no sentence translation, no markdown."
 
     suspend fun load(word: String, language: Lang, s: AppSettings): String {
+        // The panel already blocks words inside restored private spans; this also covers direct callers.
+        if (s.privacy.active && s.privacy.spans(word).isNotEmpty()) throw TranslateException(PRIVATE_WORD)
         val custom = s.providerId == Providers.CUSTOM
         val key = Key(word, language.code, if (custom) Providers.cacheKey(s) else "bilibili|${s.biliModel}")
         return mutex.withLock {

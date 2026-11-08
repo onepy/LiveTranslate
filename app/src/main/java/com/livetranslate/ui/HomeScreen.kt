@@ -220,7 +220,8 @@ private fun PreviewCard(s: AppSettings, pipeline: TranslationPipeline, host: Set
             Box(Modifier.fillMaxWidth()) {
                 FakeChat()
                 if (input != replaced) TranslationPanel(
-                    model = PanelModel(shown, s.displayMode, s.fontSizeSp, s.sourceLang, s.targetLang, s.panelOpacity),
+                    model = PanelModel(shown, s.displayMode, s.fontSizeSp, s.sourceLang, s.targetLang, s.panelOpacity,
+                        maskedCount = if (s.privacy.active && input.isNotBlank()) s.privacy.spans(shown.source).size else 0),
                     actions = actions,
                     onDismiss = { input = "" },
                     onDrag = { _, _ -> },

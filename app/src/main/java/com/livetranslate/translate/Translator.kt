@@ -1,6 +1,7 @@
 package com.livetranslate.translate
 
 import com.livetranslate.net.HttpException
+import com.livetranslate.net.PrivacyBlockedException
 import kotlinx.coroutines.flow.Flow
 import org.json.JSONException
 import java.io.IOException
@@ -26,6 +27,7 @@ fun Throwable.toUserMessage(): String = when (this) {
     }
     is UnknownHostException, is ConnectException -> "网络连接失败，请检查网络"
     is SocketTimeoutException -> "请求超时"
+    is PrivacyBlockedException -> "请求里仍含名单内容，已拦截未发送（名单词可能和翻译指令里的固定词重名）"
     is SSLException -> "安全连接失败（${message}）"
     is JSONException -> "翻译源返回了无法解析的数据"
     is IOException -> "网络错误：${message ?: javaClass.simpleName}"

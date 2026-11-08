@@ -21,6 +21,7 @@ An Android tool that translates what you type in any app's input box as you type
 - **Translation styles** (LLM providers): casual, texting / internet slang, faithful, formal, or a custom style described in your own words.
 - **Short-term context** (optional, LLM providers): if you start a new paragraph within 5 seconds of a successful replace, up to the last 3 source paragraphs (max 500 characters) are sent along as reference so omitted subjects resolve correctly. Kept in memory only.
 - **Word mode**: splits the translation into words; tap a word to hear it and see a Chinese definition.
+- **Privacy masking** (on by default): items on your local list (names, companies, addresses, …), plus emails, Chinese ID numbers and numbers of 6+ digits, are replaced by random codes before sending and restored on the device afterwards. A list item can have an alias, e.g. 张三 → "Zhang San".
 - **Text-to-speech**: uses the system TTS, with selectable engine and speech rate.
 - **App scope**: all apps, or only the apps you pick.
 - **Staying alive in the background**: after a one-time grant via Shizuku or adb, the service is revived automatically if the system kills it. Also provides an ongoing notification, battery-optimization whitelisting, shortcuts to vendor autostart settings, and a Quick Settings tile to pause / resume.
@@ -29,9 +30,16 @@ An Android tool that translates what you type in any app's input box as you type
 ## Privacy
 
 - **Password fields are never read.**
+- **Privacy masking** (Settings → 隐私脱敏): anything matched by your list or the built-in rules is replaced by a random code (e.g. `ZQX7`) before sending. Codes are drawn fresh for every request, the provider only ever sees the codes, and the original values are restored on the device.
+  - Short-term context, custom styles and word definitions are masked too.
+  - In realtime mode, a half-typed list item or number right before the cursor is masked as well.
+  - If codes come back missing or damaged, Replace is disabled.
+  - A network-level check blocks any request that still contains a list item.
+  - Limits: only literal text is masked, so relationships and other meaning still go out, and masked parts may translate less accurately.
+  - Speech and copy use the restored translation; online TTS engines and IME cloud clipboards are not covered.
 - Text is sent only to the provider you selected. Word definitions use your custom AI provider when it is the current provider, and Bilibili otherwise.
 - No analytics, ads or crash-reporting SDKs.
-- The custom-AI API key is encrypted with an Android Keystore key (AES-GCM) and stored on the device only; system backup is disabled (`allowBackup=false`).
+- The custom-AI API key and the privacy list are encrypted with an Android Keystore key (AES-GCM) and stored on the device only; system backup is disabled (`allowBackup=false`).
 - Short-term context and the word-definition cache live in memory only and are gone when the process ends.
 - Cleartext HTTP is allowed so you can reach model servers on localhost or your LAN; use HTTPS for anything on the internet.
 - The code contains a developer-only node diagnostic broadcast. Senders must hold `android.permission.DUMP`, which only the adb shell has, so regular apps cannot trigger it.
@@ -110,8 +118,9 @@ app/src/main/java/com/livetranslate/
 ├── a11y/        accessibility service: input watching, translation ranges, safe replace, boot recovery
 ├── data/        settings storage, API-key encryption, translation styles
 ├── keepalive/   ongoing notification, watchdog job, Quick Settings tile, vendor autostart pages
-├── net/         OkHttp wrapper, SSE parsing, Doubao cookie sync
+├── net/         OkHttp wrapper, SSE parsing, Doubao cookie sync, privacy guard interceptor
 ├── overlay/     translation panel (Jetpack Compose) and overlay window
+├── privacy/     privacy masking: matching rules, random codes, streaming restore and checks
 ├── shizuku/     runs grant commands as the shell user through Shizuku
 ├── translate/   providers, translation pipeline (debounce / cancel / cache), short-term context, word definitions
 ├── tts/         text-to-speech

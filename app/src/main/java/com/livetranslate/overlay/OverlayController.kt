@@ -36,6 +36,8 @@ data class PanelModel(
     val to: Lang = Lang.EN,
     val opacity: Float = 0.95f,
     val contextCount: Int = 0,
+    /** Private spans masked in the source before sending (shown as "已脱敏N处"). */
+    val maskedCount: Int = 0,
 )
 
 /**
@@ -78,7 +80,8 @@ class OverlayController(
             detach()
             return
         }
-        model.value = PanelModel(state, s.displayMode, s.fontSizeSp, s.sourceLang, s.targetLang, s.panelOpacity, state.contextCount)
+        model.value = PanelModel(state, s.displayMode, s.fontSizeSp, s.sourceLang, s.targetLang, s.panelOpacity, state.contextCount,
+            maskedCount = if (s.privacy.active) s.privacy.spans(state.source).size else 0)
         if (!dragging) position(focus.bounds, s)
         attach()
     }

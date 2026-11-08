@@ -3,6 +3,7 @@ package com.livetranslate.translate
 import com.livetranslate.data.ApiFormat
 import com.livetranslate.data.AppSettings
 import com.livetranslate.data.Styles
+import com.livetranslate.privacy.MaskingTranslator
 import org.json.JSONObject
 
 data class ProviderInfo(val id: String, val name: String, val note: String)
@@ -36,7 +37,17 @@ object Providers {
 
     fun info(id: String): ProviderInfo = all.firstOrNull { it.id == id } ?: all.first()
 
-    fun create(id: String, s: AppSettings, context: List<String> = emptyList()): Translator = when (id) {
+    /**
+     * [caret] is the cursor offset inside [text] during realtime typing (-1 otherwise). With privacy
+     * masking on, the provider only ever receives masked text, style and short-term context.
+     */
+    fun create(id: String, s: AppSettings, context: List<String> = emptyList(), caret: Int = -1): Translator {
+        val build = { style: String, ctx: List<String> -> plain(id, s, style + contextPrompt(ctx)) }
+        return if (s.privacy.active) MaskingTranslator(s.privacy, style(s), context, caret, build = build)
+        else build(style(s), context)
+    }
+
+    private fun plain(id: String, s: AppSettings, prompt: String): Translator = when (id) {
         DOUBAO -> DoubaoTranslator("1")
         DOUBAO_VOLC -> DoubaoTranslator("0")
         DOUBAO_MS -> DoubaoTranslator("3")
@@ -44,10 +55,10 @@ object Providers {
         GOOGLE -> GoogleFreeTranslator()
         GOOGLE2 -> GoogleBrowserTranslator()
         CUSTOM -> when (s.customFormat) {
-            ApiFormat.CHAT -> ChatCompletionsTranslator(s.customBaseUrl, s.customApiKey, s.customModel, style(s) + contextPrompt(context))
-            ApiFormat.RESPONSES -> ResponsesTranslator(s.customBaseUrl, s.customApiKey, s.customModel, style(s) + contextPrompt(context))
+            ApiFormat.CHAT -> ChatCompletionsTranslator(s.customBaseUrl, s.customApiKey, s.customModel, prompt)
+            ApiFormat.RESPONSES -> ResponsesTranslator(s.customBaseUrl, s.customApiKey, s.customModel, prompt)
         }
-        else -> ChatCompletionsTranslator(BILI_URL, "", s.biliModel, style(s) + contextPrompt(context)) {
+        else -> ChatCompletionsTranslator(BILI_URL, "", s.biliModel, prompt) {
             put("chat_template_kwargs", JSONObject().put("enable_thinking", false))
         }
     }
@@ -71,7 +82,7 @@ object Providers {
         CUSTOM -> "$CUSTOM|${s.customFormat}|${s.customBaseUrl}|${s.customModel}|${s.customApiKey.hashCode()}|${style(s).hashCode()}"
         BILIBILI -> "$BILIBILI|${s.biliModel}|${style(s).hashCode()}"
         else -> s.providerId
-    }
+    } + "|privacy=${s.privacy.fingerprint()}"
 
     fun isUsable(id: String, s: AppSettings): Boolean = when (id) {
         in doubaoIds -> DoubaoSession.isLoggedIn()

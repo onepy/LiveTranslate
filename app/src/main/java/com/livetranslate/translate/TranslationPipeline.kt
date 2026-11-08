@@ -21,6 +21,8 @@ data class PipelineConfig(
     val to: Lang,
     val debounceMs: Long,
     val context: List<String> = emptyList(),
+    /** Cursor offset inside the submitted text while typing in realtime mode, -1 otherwise. Not a cache key. */
+    val caret: Int = -1,
 )
 
 data class TranslationUi(
@@ -47,7 +49,7 @@ class TranslationPipeline(
     private data class Request(val text: String, val cfg: PipelineConfig, val attempt: Int)
     private data class CacheKey(val text: String, val providerKey: String, val from: Lang, val to: Lang, val context: List<String>)
 
-    private data class Input(val text: String = "", val immediate: Boolean = false, val revision: Long = 0, val context: List<String> = emptyList())
+    private data class Input(val text: String = "", val immediate: Boolean = false, val revision: Long = 0, val context: List<String> = emptyList(), val caret: Int = -1)
     private val input = MutableStateFlow(Input())
     private val retryTick = MutableStateFlow(0)
     private val _state = MutableStateFlow(TranslationUi())
@@ -65,16 +67,18 @@ class TranslationPipeline(
                     // Cancel an old stream immediately, before waiting for the next typing pause.
                     _state.value = TranslationUi(source = typed.text, loading = typed.text.isNotEmpty(), providerName = cfg.providerName)
                     if (typed.text.isNotEmpty() && !typed.immediate) delay(config.value.debounceMs)
-                    run(Request(typed.text, cfg.copy(context = typed.context), attempt))
+                    run(Request(typed.text, cfg.copy(context = typed.context, caret = typed.caret), attempt))
                 }
         }
     }
 
     /** [immediate] skips the typing debounce (used for explicit triggers such as long-press). */
-    fun submit(text: String, immediate: Boolean = false, context: List<String> = emptyList()) {
+    fun submit(text: String, immediate: Boolean = false, context: List<String> = emptyList(), caret: Int = -1) {
         val trimmed = text.trim()
+        val lead = text.length - text.trimStart().length
+        val at = if (caret < 0) -1 else (caret - lead).coerceIn(0, trimmed.length)
         _state.value = TranslationUi(source = trimmed, loading = trimmed.isNotEmpty(), providerName = config.value.providerName)
-        input.value = Input(trimmed, immediate, input.value.revision + 1, context.toList())
+        input.value = Input(trimmed, immediate, input.value.revision + 1, context.toList(), at)
     }
 
     fun retry() {

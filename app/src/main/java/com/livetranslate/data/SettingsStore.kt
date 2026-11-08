@@ -1,6 +1,7 @@
 package com.livetranslate.data
 
 import android.content.Context
+import com.livetranslate.privacy.PrivacyRules
 import com.livetranslate.translate.Lang
 import com.livetranslate.translate.Providers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -36,6 +37,7 @@ data class AppSettings(
     val styleId: String = Styles.DEFAULT_ID,
     val shortContext: Boolean = false,
     val customStyles: List<TranslationStyle> = emptyList(),
+    val privacy: PrivacyRules = PrivacyRules(),
 ) {
     fun allows(pkg: String) = appScope == AppScope.ALL || pkg in whitelist
 
@@ -52,6 +54,10 @@ data class AppSettings(
 
 class SettingsStore(context: Context) {
     private val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+
+    /** The encrypted privacy list existed but could not be decrypted (e.g. Keystore reset); it loads empty. */
+    var privacyListLost = false
+        private set
     private val state = MutableStateFlow(load())
 
     val flow: StateFlow<AppSettings> = state
@@ -67,6 +73,8 @@ class SettingsStore(context: Context) {
 
     private fun load(): AppSettings {
         val d = AppSettings()
+        val entries = PrivacyRules.decodeEntries(SecretBox.decrypt(prefs.getString("privacy_enc", "")!!))
+        privacyListLost = entries.isEmpty() && prefs.getInt("privacy_count", 0) > 0
         return AppSettings(
             enabled = prefs.getBoolean("enabled", d.enabled),
             providerId = prefs.getString("provider", d.providerId)!!,
@@ -92,6 +100,13 @@ class SettingsStore(context: Context) {
             shortContext = prefs.getBoolean("short_context", false),
             styleId = prefs.getString("style", d.styleId)!!,
             customStyles = Styles.decode(prefs.getString("custom_styles", null)),
+            privacy = PrivacyRules(
+                enabled = prefs.getBoolean("privacy_on", d.privacy.enabled),
+                entries = entries,
+                emails = prefs.getBoolean("privacy_email", d.privacy.emails),
+                idCards = prefs.getBoolean("privacy_id", d.privacy.idCards),
+                longDigits = prefs.getBoolean("privacy_digits", d.privacy.longDigits),
+            ),
         )
     }
 
@@ -120,8 +135,17 @@ class SettingsStore(context: Context) {
             .putBoolean("short_context", s.shortContext)
             .putString("style", s.styleId)
             .putString("custom_styles", Styles.encode(s.customStyles))
+            .putBoolean("privacy_on", s.privacy.enabled)
+            .putBoolean("privacy_email", s.privacy.emails)
+            .putBoolean("privacy_id", s.privacy.idCards)
+            .putBoolean("privacy_digits", s.privacy.longDigits)
             .apply {
                 if (s.customApiKey != old.customApiKey) putString("custom_key_enc", SecretBox.encrypt(s.customApiKey))
+                if (s.privacy.entries != old.privacy.entries) {
+                    putString("privacy_enc", SecretBox.encrypt(PrivacyRules.encodeEntries(s.privacy.entries)))
+                    putInt("privacy_count", s.privacy.entries.size)
+                    privacyListLost = false
+                }
             }
             .apply()
     }

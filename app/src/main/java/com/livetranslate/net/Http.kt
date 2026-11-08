@@ -1,5 +1,6 @@
 package com.livetranslate.net
 
+import com.livetranslate.App
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.flow.Flow
@@ -21,6 +22,7 @@ object Http {
 
     val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
+            .addInterceptor(PrivacyGuard { runCatching { App.settings.value.privacy }.getOrNull() })
             .cookieJar(DoubaoCookieJar)
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)

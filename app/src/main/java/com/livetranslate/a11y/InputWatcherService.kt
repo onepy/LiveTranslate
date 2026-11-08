@@ -60,7 +60,7 @@ class InputWatcherService : AccessibilityService(), PanelActions {
         nodeDiagnostic = NodeDiagnostic(this).also { it.register() }
         val config = settings.flow.map { it.toPipelineConfig() }
             .stateIn(scope, SharingStarted.Eagerly, settings.value.toPipelineConfig())
-        pipeline = TranslationPipeline(scope, config, translatorFor = { cfg -> Providers.create(settings.value.providerId, settings.value, cfg.context) })
+        pipeline = TranslationPipeline(scope, config, translatorFor = { cfg -> Providers.create(settings.value.providerId, settings.value, cfg.context, cfg.caret) })
         tts = TtsManager(this, scope, settings)
         overlay = OverlayController(this, settings, this)
 
@@ -69,7 +69,7 @@ class InputWatcherService : AccessibilityService(), PanelActions {
                 .collect { (f, st, s) -> overlay.render(f, st, s) }
         }
         scope.launch {
-            settings.flow.map { listOf(it.enabled, it.appScope, it.whitelist, it.triggerMode, it.shortContext, it.providerId, it.sourceLang, it.targetLang) }
+            settings.flow.map { listOf(it.enabled, it.appScope, it.whitelist, it.triggerMode, it.shortContext, it.providerId, it.sourceLang, it.targetLang, it.privacy) }
                 .distinctUntilChanged().drop(1)
                 .collect {
                     shortContext.clear()
@@ -211,8 +211,11 @@ class InputWatcherService : AccessibilityService(), PanelActions {
         val end = node.textSelectionEnd.takeIf { it in 0..text.length } ?: start
         val range = TranslationRanges.select(text, start, end, explicit && settings.value.triggerMode == TriggerMode.LONG_PRESS)
         targetRange = range
+        // Realtime typing: tell masking where the cursor is, so a half-typed entry or number is masked too.
+        val caret = if (range != null && settings.value.triggerMode == TriggerMode.REALTIME && start >= range.start)
+            (start - range.start).coerceAtMost(range.text.length) else -1
         pipeline.submit(range?.text.orEmpty(), immediate = settings.value.triggerMode == TriggerMode.LONG_PRESS,
-            context = if (contextEnabled) draftContext else emptyList())
+            context = if (contextEnabled) draftContext else emptyList(), caret = caret)
     }
 
     private fun clearFocus() {

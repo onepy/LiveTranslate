@@ -48,6 +48,8 @@ import com.livetranslate.data.Styles
 import com.livetranslate.data.TranslationStyle
 import com.livetranslate.data.TriggerMode
 import com.livetranslate.keepalive.KeepAlive
+import com.livetranslate.privacy.PrivacyEntry
+import com.livetranslate.privacy.PrivacyRules
 import com.livetranslate.shizuku.ShizukuHelper
 import com.livetranslate.translate.DoubaoSession
 import com.livetranslate.translate.Lang
@@ -78,6 +80,7 @@ fun SettingsPage(host: SettingsHost, tts: TtsManager, refreshTick: Int, onBack: 
             item { ProviderSection(s, update, refreshTick, host) }
             item { StyleSection(s, update) }
             item { TranslateSection(s, update) }
+            item { PrivacySection(s, update) }
             item { TtsSection(s, update, tts, host) }
             item { AppScopeSection(s, update) }
             item { KeepAliveSection(s, update, refreshTick, host) }
@@ -317,6 +320,58 @@ private fun TranslateSection(s: AppSettings, update: Update) {
                 update { it.copy(debounceMs = (v / 50).roundToInt() * 50L) }
             }
         }
+    }
+}
+
+@Composable
+private fun PrivacySection(s: AppSettings, update: Update) {
+    val p = s.privacy
+    val setP: ((PrivacyRules) -> PrivacyRules) -> Unit = { f -> update { it.copy(privacy = f(it.privacy)) } }
+    var adding by remember { mutableStateOf(false) }
+    SectionCard("隐私脱敏", subtitle = "命中的内容先换成随机代号再发给翻译源，译文回来后在本机换回") {
+        SwitchRow("发送前脱敏", p.enabled) { v -> setP { it.copy(enabled = v) } }
+        if (p.enabled) {
+            SwitchRow("邮箱", p.emails) { v -> setP { it.copy(emails = v) } }
+            SwitchRow("身份证号", p.idCards) { v -> setP { it.copy(idCards = v) } }
+            SwitchRow("6 位以上数字（手机号、银行卡等）", p.longDigits) { v -> setP { it.copy(longDigits = v) } }
+            Text("名单", style = MaterialTheme.typography.labelLarge)
+            if (App.settings.privacyListLost && p.entries.isEmpty()) {
+                Text("名单解密失败，已清空，请重新添加", color = MaterialTheme.colorScheme.error)
+            }
+            if (p.entries.isEmpty()) Hint("人名、公司、地址、项目代号等，至少 ${PrivacyRules.MIN_KEY} 个字")
+            p.entries.forEach { e ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(if (e.alias.isBlank()) e.text else "${e.text} → ${e.alias}", Modifier.weight(1f))
+                    TextButton(onClick = { setP { it.copy(entries = it.entries - e) } }) { Text("删除") }
+                }
+            }
+            OutlinedButton(onClick = { adding = true }) { Text("添加") }
+            Hint("名单加密保存在本机。边打边译时，光标前没打完的名单词和数字也会先遮住。朗读和复制的是还原后的译文，在线朗读引擎、输入法云剪贴板不受保护。")
+        }
+    }
+    if (adding) {
+        var text by remember { mutableStateOf("") }
+        var alias by remember { mutableStateOf("") }
+        val valid = text.trim().length >= PrivacyRules.MIN_KEY && p.entries.none { it.text == text.trim() }
+        AlertDialog(
+            onDismissRequest = { adding = false },
+            title = { Text("添加脱敏内容") },
+            text = {
+                androidx.compose.foundation.layout.Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(value = text, onValueChange = { text = it }, label = { Text("原文") },
+                        placeholder = { Text("例如：张三") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = alias, onValueChange = { alias = it }, label = { Text("译文中显示为（可选）") },
+                        placeholder = { Text("例如：Zhang San") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                }
+            },
+            confirmButton = {
+                TextButton(enabled = valid, onClick = {
+                    setP { it.copy(entries = it.entries + PrivacyEntry(text.trim(), alias.trim())) }
+                    adding = false
+                }) { Text("保存") }
+            },
+            dismissButton = { TextButton(onClick = { adding = false }) { Text("取消") } },
+        )
     }
 }
 

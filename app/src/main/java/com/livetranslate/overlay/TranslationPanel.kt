@@ -79,11 +79,16 @@ fun TranslationPanel(
     var showWords by remember(st.source) { mutableStateOf(false) }
     val compact = PaddingValues(horizontal = 10.dp, vertical = 0.dp)
     var selectedWord by remember(st.source, st.result) { mutableStateOf<String?>(null) }
+    var selectedPrivate by remember(st.source, st.result) { mutableStateOf(false) }
     var meaning by remember(st.source, st.result) { mutableStateOf("") }
     var meaningError by remember(st.source, st.result) { mutableStateOf<String?>(null) }
     var meaningLoading by remember { mutableStateOf(false) }
     var meaningRetry by remember { mutableStateOf(0) }
     val analysisSettings by com.livetranslate.App.settings.flow.collectAsState()
+    // Restored private values (entries, aliases, emails, numbers) in the translation: never looked up or read aloud from word mode.
+    val privateRanges = remember(st.result, analysisSettings.privacy) {
+        if (analysisSettings.privacy.active) analysisSettings.privacy.spans(st.result) else emptyList()
+    }
     androidx.compose.runtime.LaunchedEffect(showWords, selectedWord, st.source, st.result, meaningRetry,
         analysisSettings.providerId, analysisSettings.customFormat, analysisSettings.customBaseUrl,
         analysisSettings.customModel, analysisSettings.customApiKey, analysisSettings.biliModel, model.to) {
@@ -91,7 +96,9 @@ fun TranslationPanel(
         meaning = ""
         meaningError = null
         val word = selectedWord
-        if (showWords && word != null) {
+        if (showWords && word != null && selectedPrivate) {
+            meaning = com.livetranslate.translate.WordMeanings.PRIVATE_WORD
+        } else if (showWords && word != null) {
             meaningLoading = true
             try {
                 meaning = com.livetranslate.translate.WordMeanings.load(word, model.to, analysisSettings)
@@ -144,6 +151,17 @@ fun TranslationPanel(
                             .padding(vertical = 6.dp),
                     )
                 }
+                if (model.maskedCount > 0) {
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "已脱敏${model.maskedCount}处",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.tertiary,
+                        maxLines = 1,
+                        softWrap = false,
+                        modifier = Modifier.padding(vertical = 6.dp),
+                    )
+                }
                 if (st.loading) {
                     Spacer(Modifier.width(8.dp))
                     CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp)
@@ -167,7 +185,8 @@ fun TranslationPanel(
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                         modifier = Modifier.padding(vertical = 4.dp),
                     ) {
-                        Words.split(st.result, model.to.locale).forEach { word ->
+                        Words.tokens(st.result, model.to.locale).forEach { (word, range) ->
+                            val private = privateRanges.any { it.first <= range.last && range.first <= it.last }
                             Text(
                                 text = word,
                                 fontSize = model.fontSp.sp,
@@ -175,8 +194,9 @@ fun TranslationPanel(
                                 modifier = Modifier
                                     .background(androidx.compose.ui.graphics.Color(0xFF153E68), RoundedCornerShape(8.dp))
                                     .clickable {
-                                        actions.speak(word)
+                                        if (!private) actions.speak(word)
                                         if (selectedWord == word && meaningError != null) meaningRetry++
+                                        selectedPrivate = private
                                         selectedWord = word
                                     }
                                     .padding(horizontal = 8.dp, vertical = 4.dp),
@@ -231,7 +251,7 @@ fun TranslationPanel(
                 Spacer(Modifier.weight(1f))
                 Button(
                     onClick = { actions.replace() },
-                    enabled = hasResult && !st.loading,
+                    enabled = hasResult && !st.loading && st.error == null,
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 0.dp),
                     modifier = Modifier.padding(end = 4.dp),
                 ) { Text("替换") }
