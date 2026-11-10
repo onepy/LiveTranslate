@@ -1,6 +1,5 @@
 package com.livetranslate.ui
 
-import android.os.Build
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -36,11 +35,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.livetranslate.App
+import com.livetranslate.BuildConfig
 import com.livetranslate.a11y.A11yEnabler
+import com.livetranslate.a11y.ServiceLog
 import com.livetranslate.data.ApiFormat
 import com.livetranslate.data.AppScope
 import com.livetranslate.data.AppSettings
@@ -84,7 +86,28 @@ fun SettingsPage(host: SettingsHost, tts: TtsManager, refreshTick: Int, onBack: 
             item { TtsSection(s, update, tts, host) }
             item { AppScopeSection(s, update) }
             item { KeepAliveSection(s, update, refreshTick, host) }
+            item { DiagnosticsSection(host, refreshTick) }
         }
+    }
+}
+
+@Composable
+private fun DiagnosticsSection(host: SettingsHost, refreshTick: Int) {
+    val context = LocalContext.current
+    var tick by remember { mutableStateOf(0) }
+    val lines = remember(refreshTick, tick) { ServiceLog.lines().takeLast(15) }
+    val crash = remember(refreshTick, tick) { ServiceLog.lastCrash.lineSequence().drop(1).firstOrNull().orEmpty() }
+    SectionCard("诊断", subtitle = "服务启动、停止、自动恢复和崩溃的记录，只保存在本机") {
+        if (lines.isEmpty()) Hint("暂无记录")
+        else Text(lines.joinToString("\n"), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+        if (crash.isNotBlank()) {
+            Text("上次崩溃：$crash", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        }
+        FlowRow2 {
+            OutlinedButton(onClick = { host.copyText(ServiceLog.report(context, BuildConfig.VERSION_NAME)) }) { Text("复制诊断信息") }
+            TextButton(onClick = { ServiceLog.clear(); tick++ }) { Text("清空") }
+        }
+        Hint("面板不出来时，把诊断信息发给开发者。记录里不含你输入的文字。")
     }
 }
 
@@ -425,7 +448,8 @@ private fun KeepAliveSection(s: AppSettings, update: Update, refreshTick: Int, h
     val shizuku = remember(refreshTick) { ShizukuHelper.isRunning() }
     val canWrite = remember(refreshTick) { A11yEnabler.canWriteSecureSettings(context) }
 
-    SectionCard("防止被杀后台", subtitle = "从上往下做完，基本就不会掉了") {
+    SectionCard("防止被杀后台", subtitle = "授权自动恢复，并允许系统保留后台服务") {
+        OutlinedButton(onClick = host::restartService) { Text("重启服务 / 重建面板") }
         CheckItem(
             done = status.autoRestore,
             title = "被杀后自动恢复",
@@ -453,10 +477,8 @@ private fun KeepAliveSection(s: AppSettings, update: Update, refreshTick: Int, h
                         if (v && !KeepAlive.hasNotificationPermission(context)) host.requestNotificationPermission()
                     },
                 )
-                if (s.keepAliveNotification && !KeepAlive.hasNotificationPermission(context) &&
-                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
-                ) {
-                    TextButton(onClick = host::requestNotificationPermission) { Text("允许通知") }
+                if (s.keepAliveNotification && !status.notification) {
+                    TextButton(onClick = host::openNotificationSettings) { Text("通知设置") }
                 }
             }
         }
@@ -466,6 +488,10 @@ private fun KeepAliveSection(s: AppSettings, update: Update, refreshTick: Int, h
         CheckItem(done = null, title = "允许自启动 / 后台运行", desc = "小米、华为、OPPO、vivo 等必须打开") {
             OutlinedButton(onClick = host::openAutostart) { Text("去设置") }
         }
+        CheckItem(done = null, title = "厂商后台弹出 / 悬浮显示权限", desc = "部分系统单独限制后台显示，请在应用信息里检查；App 无法统一读取厂商开关") {
+            OutlinedButton(onClick = host::openAppDetails) { Text("打开应用信息") }
+        }
+        Hint("翻译面板使用无障碍悬浮层，Android 标准悬浮窗权限不决定它是否可用。首页显示服务连接状态，窗口显示失败会单独提示。")
         CheckItem(done = null, title = "在最近任务里锁住本 App", desc = "打开最近任务，下拉或长按本 App 的卡片，选「锁定」")
         CheckItem(done = null, title = "加一个快捷开关", desc = "下拉通知栏 → 编辑 → 把「边写边译」拖进去，一键暂停/恢复")
         if (shizuku && canWrite) {

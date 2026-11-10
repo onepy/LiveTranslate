@@ -22,8 +22,13 @@ class PrivacyBlockedException : IOException("request blocked: contains a privacy
 class PrivacyGuard(private val rules: () -> PrivacyRules?) : Interceptor {
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
-        val r = rules()
-        if (r != null && texts(request).any(r::containsEntry)) throw PrivacyBlockedException()
+        val hit = try {
+            val r = rules()
+            r != null && texts(request).any(r::containsEntry)
+        } catch (e: Exception) {
+            throw IOException("隐私检查失败：${e.javaClass.simpleName}", e)
+        }
+        if (hit) throw PrivacyBlockedException()
         return chain.proceed(request)
     }
 

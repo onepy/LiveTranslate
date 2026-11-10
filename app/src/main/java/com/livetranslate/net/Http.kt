@@ -22,7 +22,7 @@ object Http {
 
     val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
-            .addInterceptor(PrivacyGuard { runCatching { App.settings.value.privacy }.getOrNull() })
+            .addInterceptor(PrivacyGuard { App.settings.value.privacy })
             .cookieJar(DoubaoCookieJar)
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
@@ -30,33 +30,33 @@ object Http {
     }
 
     /** Streams response body lines. Cancelling the collector cancels the underlying HTTP call. */
-    fun lines(request: Request): Flow<String> = callbackFlow {
-        val call = client.newCall(request)
+    fun lines(request: Request, calls: Call.Factory = client): Flow<String> = callbackFlow {
+        val call = calls.newCall(request)
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
                 close(e)
             }
 
             override fun onResponse(call: Call, response: Response) {
-                response.use { resp ->
-                    if (!resp.isSuccessful) {
-                        close(HttpException(resp.code, resp.body?.string().orEmpty().take(500)))
-                        return
-                    }
-                    val source = resp.body?.source()
-                    if (source == null) {
-                        close()
-                        return
-                    }
-                    try {
+                try {
+                    response.use { resp ->
+                        if (!resp.isSuccessful) {
+                            close(HttpException(resp.code, resp.body?.string().orEmpty().take(500)))
+                            return
+                        }
+                        val source = resp.body?.source()
+                        if (source == null) {
+                            close()
+                            return
+                        }
                         while (true) {
                             val line = source.readUtf8Line() ?: break
                             if (trySendBlocking(line).isFailure) break
                         }
-                        close()
-                    } catch (e: IOException) {
-                        close(e)
                     }
+                    close()
+                } catch (e: Exception) {
+                    close(e)
                 }
             }
         })

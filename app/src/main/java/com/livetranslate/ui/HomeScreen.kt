@@ -1,5 +1,6 @@
 package com.livetranslate.ui
 
+import android.text.format.DateFormat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -54,7 +55,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.livetranslate.App
+import com.livetranslate.a11y.A11yEnabler
 import com.livetranslate.a11y.InputWatcherService
+import com.livetranslate.a11y.ServiceHealth
+import com.livetranslate.a11y.ServiceLog
 import com.livetranslate.data.AppSettings
 import com.livetranslate.data.DisplayMode
 import com.livetranslate.data.Styles
@@ -70,7 +74,7 @@ import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun HomeScreen(host: SettingsHost, pipeline: TranslationPipeline, refreshTick: Int, onOpenSettings: () -> Unit) {
+fun HomeScreen(host: SettingsHost, pipeline: TranslationPipeline, refreshTick: Int, health: ServiceHealth, onOpenSettings: () -> Unit) {
     val s by App.settings.flow.collectAsState()
     Scaffold(
         topBar = {
@@ -87,7 +91,7 @@ fun HomeScreen(host: SettingsHost, pipeline: TranslationPipeline, refreshTick: I
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            item { StatusHero(s, host, refreshTick, onOpenSettings) }
+            item { StatusHero(s, health, host, refreshTick, onOpenSettings) }
             item { PreviewCard(s, pipeline, host, onOpenSettings) }
             item { StyleCard(s) }
         }
@@ -96,24 +100,29 @@ fun HomeScreen(host: SettingsHost, pipeline: TranslationPipeline, refreshTick: I
 
 /** One card, one message, at most one big button: tells the user exactly what (if anything) to do next. */
 @Composable
-private fun StatusHero(s: AppSettings, host: SettingsHost, refreshTick: Int, onOpenSettings: () -> Unit) {
+private fun StatusHero(s: AppSettings, health: ServiceHealth, host: SettingsHost, refreshTick: Int, onOpenSettings: () -> Unit) {
     val context = LocalContext.current
-    val running by InputWatcherService.isRunning.collectAsState()
     val shizuku = remember(refreshTick) { ShizukuHelper.isRunning() }
+    val canWrite = remember(refreshTick) { A11yEnabler.canWriteSecureSettings(context) }
     val keep = remember(refreshTick, s.keepAliveNotification) { KeepAlive.status(context, s) }
+    val fault by InputWatcherService.faultMessage.collectAsState()
     var showHelp by remember { mutableStateOf(false) }
+    var recoveredAt by remember(refreshTick) { mutableStateOf(ServiceLog.unseenRecoveryAt) }
 
-    val needsSetup = s.enabled && !running
     val scheme = MaterialTheme.colorScheme
-    val (container, content) = when {
-        !s.enabled -> scheme.surfaceVariant to scheme.onSurfaceVariant
-        needsSetup -> scheme.errorContainer to scheme.onErrorContainer
-        else -> scheme.primaryContainer to scheme.onPrimaryContainer
+    val (container, content) = when (health) {
+        ServiceHealth.PAUSED, ServiceHealth.STARTING -> scheme.surfaceVariant to scheme.onSurfaceVariant
+        ServiceHealth.OK -> scheme.primaryContainer to scheme.onPrimaryContainer
+        else -> scheme.errorContainer to scheme.onErrorContainer
     }
-    val (title, subtitle) = when {
-        !s.enabled -> "已暂停" to "打开右边的开关继续"
-        needsSetup -> "还差一步" to "需要开启无障碍服务"
-        else -> "正在工作" to "去任意 App 的输入框打字就行"
+    val (title, subtitle) = when (health) {
+        ServiceHealth.PAUSED -> "已暂停" to "打开右边的开关继续"
+        ServiceHealth.OFF -> if (ServiceLog.everConnected) "无障碍被关闭了" to "系统无障碍开关已关闭，请重新开启"
+        else "还差一步" to "需要开启无障碍服务"
+        ServiceHealth.STARTING -> "正在启动…" to "稍等一下"
+        ServiceHealth.NOT_RUNNING -> "服务没有运行" to "系统开关已开启，但无障碍服务尚未连接，请重启服务"
+        ServiceHealth.UNRESPONSIVE -> "服务出现异常" to (fault ?: "请重启服务恢复输入监听和翻译面板")
+        ServiceHealth.OK -> "服务已连接" to "在生效范围内的 App 输入框打字即可翻译"
     }
 
     Card(
@@ -123,10 +132,10 @@ private fun StatusHero(s: AppSettings, host: SettingsHost, refreshTick: Int, onO
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
-                    imageVector = when {
-                        !s.enabled -> Icons.Filled.Info
-                        needsSetup -> Icons.Filled.Warning
-                        else -> Icons.Filled.CheckCircle
+                    imageVector = when (health) {
+                        ServiceHealth.PAUSED, ServiceHealth.STARTING -> Icons.Filled.Info
+                        ServiceHealth.OK -> Icons.Filled.CheckCircle
+                        else -> Icons.Filled.Warning
                     },
                     contentDescription = null,
                     modifier = Modifier.size(40.dp),
@@ -139,34 +148,67 @@ private fun StatusHero(s: AppSettings, host: SettingsHost, refreshTick: Int, onO
                 Switch(checked = s.enabled, onCheckedChange = { v -> App.settings.update { it.copy(enabled = v) } })
             }
 
-            if (needsSetup) {
-                Button(onClick = host::oneTapSetup, modifier = Modifier.fillMaxWidth().height(52.dp)) {
-                    Text(if (shizuku) "用 Shizuku 一键开启" else "去开启", style = MaterialTheme.typography.titleMedium)
-                }
-                if (!shizuku) {
-                    TextButton(onClick = { showHelp = !showHelp }) { Text("开关是灰色的、打不开？") }
-                    if (showHelp) {
-                        Text(
-                            "这是系统对非商店安装 App 的限制：打开「应用信息」→ 右上角菜单 →「允许受限制的设置」，再回来点「去开启」。",
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                        OutlinedButton(onClick = host::openAppDetails) { Text("打开应用信息") }
+            when (health) {
+                ServiceHealth.OFF -> {
+                    Button(onClick = host::oneTapSetup, modifier = Modifier.fillMaxWidth().height(52.dp)) {
+                        Text(if (shizuku) "用 Shizuku 一键开启" else "去开启", style = MaterialTheme.typography.titleMedium)
+                    }
+                    if (!shizuku) {
+                        TextButton(onClick = { showHelp = !showHelp }) { Text("开关是灰色的、打不开？") }
+                        if (showHelp) {
+                            Text(
+                                "这是系统对非商店安装 App 的限制：打开「应用信息」→ 右上角菜单 →「允许受限制的设置」，再回来点「去开启」。",
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                            OutlinedButton(onClick = host::openAppDetails) { Text("打开应用信息") }
+                        }
                     }
                 }
-            } else if (s.enabled && keep.ready < keep.total) {
-                Surface(
-                    onClick = onOpenSettings,
-                    shape = RoundedCornerShape(14.dp),
-                    color = content.copy(alpha = 0.08f),
-                    contentColor = content,
-                ) {
-                    Row(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                ServiceHealth.NOT_RUNNING, ServiceHealth.UNRESPONSIVE -> {
+                    Button(onClick = host::restartService, modifier = Modifier.fillMaxWidth().height(52.dp)) {
+                        Text("重启服务", style = MaterialTheme.typography.titleMedium)
+                    }
+                    if (!canWrite && !shizuku) {
                         Text(
-                            "防杀后台 ${keep.ready}/${keep.total}，去完善",
+                            "重启会先尝试重建面板和输入监听。仍未恢复时，到系统无障碍设置把「边写边译」关掉再打开。",
                             style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.weight(1f),
                         )
-                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null)
+                    }
+                }
+                ServiceHealth.OK -> {
+                    if (s.enabled && keep.ready < keep.total) {
+                        Surface(
+                            onClick = onOpenSettings,
+                            shape = RoundedCornerShape(14.dp),
+                            color = content.copy(alpha = 0.08f),
+                            contentColor = content,
+                        ) {
+                            Row(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    "防杀后台 ${keep.ready}/${keep.total}，去完善",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null)
+                            }
+                        }
+                    }
+                    TextButton(onClick = host::restartService) { Text("面板不出来？重启服务") }
+                }
+                else -> Unit
+            }
+
+            TextButton(onClick = host::openAccessibilitySettings) { Text("系统无障碍设置") }
+
+            if (recoveredAt > 0) {
+                Surface(shape = RoundedCornerShape(14.dp), color = content.copy(alpha = 0.08f), contentColor = content) {
+                    Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                        Text(
+                            "在 ${DateFormat.format("MM-dd HH:mm", recoveredAt)} 检测到无障碍关闭，已自动重新开启。" +
+                                "经常这样的话，请完成设置里「防止被杀后台」的各项，并把本 App 在最近任务里锁住。",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        TextButton(onClick = { ServiceLog.ackRecovery(); recoveredAt = 0L }) { Text("知道了") }
                     }
                 }
             }

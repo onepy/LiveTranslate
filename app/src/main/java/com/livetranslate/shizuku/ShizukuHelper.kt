@@ -7,10 +7,12 @@ import android.os.IBinder
 import com.livetranslate.BuildConfig
 import com.livetranslate.keepalive.KeepAlive
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import rikka.shizuku.Shizuku
 import kotlin.concurrent.thread
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import java.util.concurrent.atomic.AtomicBoolean
 
 object ShizukuHelper {
     const val REQUEST_CODE = 7301
@@ -30,28 +32,64 @@ object ShizukuHelper {
         .debuggable(BuildConfig.DEBUG)
         .version(BuildConfig.VERSION_CODE)
 
-    /** Executes [command] as the shell user through a Shizuku UserService. */
-    suspend fun exec(command: String): String = suspendCancellableCoroutine { cont ->
+    /**
+     * Executes [command] as the shell user through a Shizuku UserService. Throws after [timeoutMs]: when the
+     * user service fails to start (Shizuku gives up after 30 s) no callback ever comes.
+     */
+    suspend fun exec(command: String, timeoutMs: Long = 35_000): String =
+        withTimeoutOrNull(timeoutMs) { execUntimed(command) }
+            ?: throw IllegalStateException("Shizuku 没有响应，请先打开 Shizuku App 确认服务正在运行，再回来重试")
+
+    private suspend fun execUntimed(command: String): String = suspendCancellableCoroutine { cont ->
         val args = args()
+        val finished = AtomicBoolean(false)
         val conn = object : ServiceConnection {
+            private fun fail(error: Exception) {
+                if (finished.compareAndSet(false, true)) {
+                    cont.resumeWithException(error)
+                    runCatching { Shizuku.unbindUserService(args, this, true) }
+                }
+            }
+
             override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+                if (finished.get() || !cont.isActive) {
+                    runCatching { Shizuku.unbindUserService(args, this, true) }
+                    return
+                }
+                if (binder == null) {
+                    fail(IllegalStateException("Shizuku 返回了空连接"))
+                    return
+                }
                 val conn = this
-                thread {
+                thread(name = "Shizuku-command", isDaemon = true) {
                     try {
                         val svc = IShellService.Stub.asInterface(binder)
                         val result = svc.exec(command)
-                        if (cont.isActive) cont.resume(result)
+                        if (finished.compareAndSet(false, true)) cont.resume(result)
                     } catch (e: Exception) {
-                        if (cont.isActive) cont.resumeWithException(e)
+                        if (finished.compareAndSet(false, true)) cont.resumeWithException(e)
                     } finally {
                         runCatching { Shizuku.unbindUserService(args, conn, true) }
                     }
                 }
             }
 
-            override fun onServiceDisconnected(name: ComponentName?) = Unit
+            override fun onServiceDisconnected(name: ComponentName?) = fail(IllegalStateException("Shizuku 连接已断开"))
+
+            override fun onBindingDied(name: ComponentName?) = fail(IllegalStateException("Shizuku 连接已失效"))
+
+            override fun onNullBinding(name: ComponentName?) = fail(IllegalStateException("Shizuku 无法建立连接"))
         }
-        Shizuku.bindUserService(args, conn)
+        cont.invokeOnCancellation {
+            finished.set(true)
+            runCatching { Shizuku.unbindUserService(args, conn, true) }
+        }
+        try {
+            Shizuku.bindUserService(args, conn)
+        } catch (e: Exception) {
+            if (finished.compareAndSet(false, true)) cont.resumeWithException(e)
+            runCatching { Shizuku.unbindUserService(args, conn, true) }
+        }
     }
 
     /**

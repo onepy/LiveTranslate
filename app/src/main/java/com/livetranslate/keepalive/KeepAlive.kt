@@ -22,6 +22,8 @@ import android.service.quicksettings.TileService
 import com.livetranslate.App
 import com.livetranslate.R
 import com.livetranslate.a11y.A11yEnabler
+import com.livetranslate.a11y.InputWatcherService
+import com.livetranslate.a11y.ServiceLog
 import com.livetranslate.data.AppSettings
 import com.livetranslate.ui.MainActivity
 import kotlin.concurrent.thread
@@ -40,15 +42,17 @@ object KeepAlive {
 
     fun adbGrantCommand(pkg: String) = "adb shell pm grant $pkg android.permission.WRITE_SECURE_SETTINGS"
 
-    fun shizukuBoostCommand(pkg: String): String = listOf(
-        "pm grant $pkg android.permission.WRITE_SECURE_SETTINGS",
-        "pm grant $pkg android.permission.POST_NOTIFICATIONS",
-        "dumpsys deviceidle whitelist +$pkg",
-        "cmd appops set $pkg RUN_IN_BACKGROUND allow",
-        "cmd appops set $pkg RUN_ANY_IN_BACKGROUND allow",
-        "cmd appops set $pkg ACCESS_RESTRICTED_SETTINGS allow",
-        "am set-standby-bucket $pkg active",
-    ).joinToString(" ; ") { "$it 2>&1" }
+    fun shizukuBoostCommand(pkg: String): String = buildList {
+        add("pm grant $pkg android.permission.WRITE_SECURE_SETTINGS")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            add("pm grant $pkg android.permission.POST_NOTIFICATIONS")
+            add("cmd appops set $pkg ACCESS_RESTRICTED_SETTINGS allow")
+        }
+        add("dumpsys deviceidle whitelist +$pkg")
+        add("cmd appops set $pkg RUN_IN_BACKGROUND allow")
+        add("cmd appops set $pkg RUN_ANY_IN_BACKGROUND allow")
+        add("am set-standby-bucket $pkg active")
+    }.joinToString(" ; ", prefix = "failed=0 ; ", postfix = " ; exit ${'$'}failed") { "$it 2>&1 || failed=1" }
 
     data class Status(val autoRestore: Boolean, val notification: Boolean, val battery: Boolean) {
         val ready get() = listOf(autoRestore, notification, battery).count { it }
@@ -57,14 +61,16 @@ object KeepAlive {
 
     fun status(context: Context, s: AppSettings) = Status(
         autoRestore = A11yEnabler.canWriteSecureSettings(context),
-        notification = s.keepAliveNotification && hasNotificationPermission(context),
+        notification = s.keepAliveNotification && hasNotificationPermission(context) &&
+            context.getSystemService(NotificationManager::class.java).getNotificationChannel(CHANNEL)?.importance != NotificationManager.IMPORTANCE_NONE,
         battery = isIgnoringBatteryOptimizations(context),
     )
 
     fun hasNotificationPermission(context: Context): Boolean =
-        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+        context.getSystemService(NotificationManager::class.java).areNotificationsEnabled() &&
+            (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
             context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
-            android.content.pm.PackageManager.PERMISSION_GRANTED
+            android.content.pm.PackageManager.PERMISSION_GRANTED)
 
     fun isIgnoringBatteryOptimizations(context: Context): Boolean =
         context.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(context.packageName)
@@ -103,6 +109,49 @@ object KeepAlive {
 
     fun toggleEnabled() = App.settings.update { it.copy(enabled = !it.enabled) }
 
+    // ---- "service stopped" alert ----
+
+    private const val ALERT_CHANNEL = "service_alert"
+    private const val ALERT_ID = 1002
+
+    /**
+     * Tells the user the service stopped while it should be running. Shown once per outage and never before
+     * the first successful setup. Tapping opens the app, which recovers it automatically when it can.
+     * No-op without notification permission.
+     */
+    fun notifyServiceLost(context: Context) {
+        if (!hasNotificationPermission(context) || !ServiceLog.everConnected || ServiceLog.lossNotified) return
+        runCatching {
+            val nm = context.getSystemService(NotificationManager::class.java)
+            nm.createNotificationChannel(
+                NotificationChannel(ALERT_CHANNEL, "服务停止提醒", NotificationManager.IMPORTANCE_DEFAULT).apply {
+                    description = "无障碍服务断开连接时提醒"
+                }
+            )
+            val open = PendingIntent.getActivity(
+                context, 2,
+                Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            )
+            nm.notify(
+                ALERT_ID,
+                Notification.Builder(context, ALERT_CHANNEL)
+                    .setSmallIcon(R.drawable.ic_tile)
+                    .setContentTitle("边写边译已停止工作")
+                    .setContentText("无障碍服务未连接，点此检查并恢复")
+                    .setContentIntent(open)
+                    .setAutoCancel(true)
+                    .build(),
+            )
+            ServiceLog.lossNotified = true
+        }
+    }
+
+    fun cancelServiceLost(context: Context) {
+        ServiceLog.lossNotified = false
+        runCatching { context.getSystemService(NotificationManager::class.java).cancel(ALERT_ID) }
+    }
+
     // ---- OEM autostart / background-run pages ----
 
     private val autostartPages = listOf(
@@ -136,16 +185,36 @@ object KeepAlive {
 
 /** Periodic watchdog: wakes the process every ~15 min and revives the accessibility service if it died. */
 class WatchdogJob : JobService() {
+    private var worker: Thread? = null
+
     override fun onStartJob(params: JobParameters): Boolean {
-        thread {
-            Thread.sleep(3000) // give the system a moment to re-bind the service after the process starts
-            A11yEnabler.ensureEnabled(applicationContext, restartIfDead = true)
-            jobFinished(params, false)
+        worker?.interrupt()
+        worker = thread(name = "Service-watchdog") {
+            try {
+                Thread.sleep(3000)
+                val ctx = applicationContext
+                if (A11yEnabler.ensureEnabled(ctx, restartIfDead = true, source = "后台巡检")) Thread.sleep(3000)
+                if (!Thread.currentThread().isInterrupted) {
+                    if (App.settings.value.enabled && !InputWatcherService.isRunning.value) KeepAlive.notifyServiceLost(ctx)
+                    jobFinished(params, false)
+                }
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
         }
         return true
     }
 
-    override fun onStopJob(params: JobParameters) = true
+    override fun onStopJob(params: JobParameters): Boolean {
+        worker?.interrupt()
+        worker = null
+        return true
+    }
+
+    override fun onDestroy() {
+        worker?.interrupt()
+        super.onDestroy()
+    }
 
     companion object {
         private const val JOB_ID = 4201
@@ -171,7 +240,7 @@ class ToggleReceiver : BroadcastReceiver() {
 /** Quick-settings tile: one-tap pause/resume; opening the shade also wakes the app. */
 class ToggleTile : TileService() {
     override fun onStartListening() {
-        A11yEnabler.ensureEnabled(this)
+        A11yEnabler.ensureEnabled(this, source = "快捷开关")
         refresh()
     }
 
@@ -185,7 +254,12 @@ class ToggleTile : TileService() {
         val on = App.settings.value.enabled
         tile.state = if (on) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
         tile.label = "边写边译"
-        tile.subtitle = if (on) "运行中" else "已暂停"
+        tile.subtitle = when {
+            !on -> "已暂停"
+            !InputWatcherService.isRunning.value -> "服务未连接"
+            InputWatcherService.faultMessage.value != null -> "服务异常"
+            else -> "服务已连接"
+        }
         tile.updateTile()
     }
 }

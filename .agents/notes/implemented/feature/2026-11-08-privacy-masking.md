@@ -16,6 +16,7 @@ Status: implemented
 - **流式还原**（`PrivacyMask.restore`）：翻译源每次发出的是累积全文。在折叠后的文本上找出完整代号（三个字母加一个数字，前面不紧跟字母，后面不紧跟数字），先整体替换，再隐藏末尾仍是某个代号前缀的 1–3 个字母；这个顺序不能反过来。还原中文值时，去掉模型在代号两侧加的空格，除非另一侧是拉丁字母或数字。名单项有别名时译文显示别名。
 - **结束校验**（`PrivacyMask.verify`）：段落里的每个代号必须出现 1 次到发送次数之间；只出现在上下文或风格里的代号最多 1 次；不能出现符合代号字母表、但不是用户自己输入的陌生代号。不通过时抛出 `TranslateException`。流水线把它记为错误，面板的「替换」按钮在 `error != null` 时禁用，`InputWatcherService.replace` 也拒绝执行，复制仍可用。
 - **兜底**（`PrivacyGuard`）：`Http.client` 的应用拦截器在请求发出前解码查询参数、表单值、JSON 字符串（含 `\/` 转义）和 HTML 实体。只要任一处还含名单词，就抛出 `PrivacyBlockedException`，请求不发出。拦截器不跑内置规则，因为豆包 URL 里固定的 18 位 `tea_uuid` 会被数字规则误判。
+  - 规则读取或检查异常时同样阻断请求，并转为 IOException 交给翻译流处理，避免异常逃逸导致服务进程退出；详见[无障碍连接恢复与故障诊断](../bug-fix/2026-11-10-service-recovery.md)。
 - **单词模式**：面板对还原后的译文再跑一遍 `spans`，落在隐私片段里的单词点击后既不朗读也不查释义；`WordMeanings.load` 遇到隐私词同样拒绝。面板标题栏显示「已脱敏 N 处」，N 不含光标前缀的临时遮盖。
 - **存储**：总开关和三条内置规则开关存为明文布尔值。名单编码成 JSON 后用 `SecretBox`（Android Keystore AES-GCM）加密，存为 `privacy_enc`，同时记录 `privacy_count`；只有名单变化时才重新加密。解密失败时名单会加载为空，`SettingsStore.privacyListLost` 让设置页提示「名单解密失败，已清空」。`Providers.cacheKey` 包含 `PrivacyRules.fingerprint()`，名单或开关一变，旧译文缓存就失效。名单或开关变化也会清空短时上下文。
 

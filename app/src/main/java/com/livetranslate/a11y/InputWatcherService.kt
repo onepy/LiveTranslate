@@ -19,11 +19,13 @@ import com.livetranslate.translate.TranslationPipeline
 import com.livetranslate.translate.toPipelineConfig
 import com.livetranslate.tts.TtsManager
 import com.livetranslate.ui.MainActivity
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.plus
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -55,18 +57,39 @@ class InputWatcherService : AccessibilityService(), PanelActions {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        val scope = MainScope().also { this.scope = it }
+        instance = this
+        connectionId++
+        running.value = false
+        fault.value = null
+        try {
+            startRuntime()
+            ServiceLog.everConnected = true
+            ServiceLog.add("服务已连接")
+            KeepAlive.cancelServiceLost(this)
+        } catch (error: Exception) {
+            reportFault("服务初始化出错：${error.javaClass.simpleName}")
+        } finally {
+            running.value = true
+        }
+    }
+
+    private fun startRuntime() {
+        stopRuntime()
+        val handler = CoroutineExceptionHandler { _, e -> reportFault("服务内部出错：${e.javaClass.simpleName}") }
+        val scope = (MainScope() + handler).also { this.scope = it }
         settings = App.settings
-        nodeDiagnostic = NodeDiagnostic(this).also { it.register() }
+        nodeDiagnostic = runCatching { NodeDiagnostic(this).also { it.register() } }.getOrNull()
         val config = settings.flow.map { it.toPipelineConfig() }
             .stateIn(scope, SharingStarted.Eagerly, settings.value.toPipelineConfig())
         pipeline = TranslationPipeline(scope, config, translatorFor = { cfg -> Providers.create(settings.value.providerId, settings.value, cfg.context, cfg.caret) })
         tts = TtsManager(this, scope, settings)
-        overlay = OverlayController(this, settings, this)
+        overlay = newOverlay()
 
         scope.launch {
             combine(focused, pipeline.state, settings.flow) { f, st, s -> Triple(f, st, s) }
-                .collect { (f, st, s) -> overlay.render(f, st, s) }
+                .collect { (f, st, s) ->
+                    runCatching { overlay.render(f, st, s) }.onFailure { reportFault("翻译面板出错：${it.javaClass.simpleName}") }
+                }
         }
         scope.launch {
             settings.flow.map { listOf(it.enabled, it.appScope, it.whitelist, it.triggerMode, it.shortContext, it.providerId, it.sourceLang, it.targetLang, it.privacy) }
@@ -84,8 +107,29 @@ class InputWatcherService : AccessibilityService(), PanelActions {
                 .distinctUntilChanged()
                 .collect { (keep, enabled) -> updateForeground(keep, enabled) }
         }
-        running.value = true
         recheckFocus()
+    }
+
+    private fun newOverlay() = OverlayController(this, settings, this) { error ->
+        if (error != null) reportFault(error) else if (fault.value?.startsWith("翻译面板无法显示") == true) fault.value = null
+    }
+
+    private fun reportFault(message: String) {
+        if (fault.value == message) return
+        fault.value = message
+        ServiceLog.add(message)
+    }
+
+    private fun resetRuntime(): Boolean {
+        fault.value = null
+        return try {
+            startRuntime()
+            ServiceLog.add("已重建翻译面板和输入监听")
+            fault.value == null
+        } catch (error: Exception) {
+            reportFault("服务初始化出错：${error.javaClass.simpleName}")
+            false
+        }
     }
 
     /** A foreground notification raises process priority so ROMs are less eager to kill us. */
@@ -106,6 +150,14 @@ class InputWatcherService : AccessibilityService(), PanelActions {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
         if (scope == null) return
+        try {
+            handleEvent(event)
+        } catch (e: Exception) {
+            reportFault("处理输入事件出错：${e.javaClass.simpleName}")
+        }
+    }
+
+    private fun handleEvent(event: AccessibilityEvent) {
         val pkg = event.packageName?.toString() ?: return
         if (pkg == packageName) {
             if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
@@ -319,15 +371,42 @@ class InputWatcherService : AccessibilityService(), PanelActions {
 
     override fun onInterrupt() = Unit
 
-    override fun onDestroy() {
-        running.value = false
+    private fun stopRuntime() {
+        scope?.cancel()
+        scope = null
+        refreshJob = null
         nodeDiagnostic?.let { runCatching { unregisterReceiver(it) } }
         nodeDiagnostic = null
         runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
-        scope?.cancel()
-        scope = null
-        if (::overlay.isInitialized) overlay.destroy()
-        if (::tts.isInitialized) tts.shutdown()
+        if (::overlay.isInitialized) runCatching { overlay.destroy() }
+        if (::tts.isInitialized) runCatching { tts.shutdown() }
+        focused.value = null
+        suppressedText = null
+        targetRange = null
+        shortContext.clear()
+        draftContext = emptyList()
+        contextEditor = null
+        contextPackage = null
+    }
+
+    private fun disconnected() {
+        if (instance === this) {
+            instance = null
+            running.value = false
+            val lost = App.settings.value.enabled && !A11yEnabler.isRestarting()
+            ServiceLog.add(if (lost) "服务连接已断开" else "服务停止")
+            if (lost) KeepAlive.notifyServiceLost(this)
+        }
+        stopRuntime()
+    }
+
+    override fun onUnbind(intent: Intent?): Boolean {
+        disconnected()
+        return super.onUnbind(intent)
+    }
+
+    override fun onDestroy() {
+        disconnected()
         super.onDestroy()
     }
 
@@ -335,5 +414,22 @@ class InputWatcherService : AccessibilityService(), PanelActions {
         private const val TAG = "InputWatcher"
         private val running = MutableStateFlow(false)
         val isRunning: StateFlow<Boolean> = running
+
+        @Volatile var connectionId = 0L
+            private set
+
+        private val fault = MutableStateFlow<String?>(null)
+        /** Set when the service is alive but broken (panel window cannot be added, internal error). */
+        val faultMessage: StateFlow<String?> = fault
+
+        @Volatile private var instance: InputWatcherService? = null
+
+        fun isConnected(): Boolean = running.value && runCatching { instance?.serviceInfo != null }.getOrDefault(false)
+
+        fun softReset(): Boolean {
+            val s = instance ?: return false
+            if (!isConnected()) return false
+            return s.resetRuntime()
+        }
     }
 }

@@ -24,7 +24,7 @@ An Android tool that translates what you type in any app's input box as you type
 - **Privacy masking** (on by default): items on your local list (names, companies, addresses, …), plus emails, Chinese ID numbers and numbers of 6+ digits, are replaced by random codes before sending and restored on the device afterwards. A list item can have an alias, e.g. 张三 → "Zhang San".
 - **Text-to-speech**: uses the system TTS, with selectable engine and speech rate.
 - **App scope**: all apps, or only the apps you pick.
-- **Staying alive in the background**: after a one-time grant via Shizuku or adb, the service is revived automatically if the system kills it. Also provides an ongoing notification, battery-optimization whitelisting, shortcuts to vendor autostart settings, and a Quick Settings tile to pause / resume.
+- **Background recovery**: after a one-time grant via Shizuku or adb, accessibility can be re-enabled when opening the app, at boot, or during periodic checks. The home screen distinguishes a disabled permission, a disconnected service, and runtime faults, and provides a restart button. Includes an ongoing notification, battery-optimization whitelisting, vendor background-setting shortcuts, and a Quick Settings tile.
 - **Languages**: auto-detect, Simplified Chinese, Traditional Chinese, English, Japanese, Korean, French, German, Spanish, Russian.
 
 ## Privacy
@@ -39,6 +39,7 @@ An Android tool that translates what you type in any app's input box as you type
   - Speech and copy use the restored translation; online TTS engines and IME cloud clipboards are not covered.
 - Text is sent only to the provider you selected. Word definitions use your custom AI provider when it is the current provider, and Bilibili otherwise.
 - No analytics, ads or crash-reporting SDKs.
+- Settings → 「诊断」 (Diagnostics) keeps the latest 40 service events and the most recent crash's exception types and stack frames on the device. It excludes input text, translations, privacy-list entries, cookies, and API keys. Copying diagnostics adds the device model, Android version, and current permission status; records can be cleared at any time.
 - The custom-AI API key and the privacy list are encrypted with an Android Keystore key (AES-GCM) and stored on the device only; system backup is disabled (`allowBackup=false`).
 - Short-term context and the word-definition cache live in memory only and are gone when the process ends.
 - Cleartext HTTP is allowed so you can reach model servers on localhost or your LAN; use HTTPS for anything on the internet.
@@ -65,6 +66,15 @@ Without Shizuku, you can run one adb command from a computer to enable automatic
 ```bash
 adb shell pm grant com.livetranslate android.permission.WRITE_SECURE_SETTINGS
 ```
+
+## Recovering a missing panel or stopped service
+
+1. Check the home screen. 「无障碍被关闭了」 means the system accessibility switch is off; 「服务没有运行」 means it is enabled but disconnected; 「服务出现异常」 shows a window or input-watching fault.
+2. Tap 「重启服务」 (Restart service), or 「面板不出来？重启服务」 when connected. With automatic-recovery permission, this reconnects the accessibility service. Without it, the app tries Shizuku or rebuilds the connected service's panel and input listeners. Return to the input box and continue typing to trigger translation.
+3. If recovery fails, open 「系统无障碍设置」 and switch this app off and on. Settings → 「防止被杀后台」 includes shortcuts for vendor autostart, background pop-up permissions, and app info; check those switches in the system settings.
+4. Copy a report from Settings → 「诊断」 when reporting the issue. The home screen also records when accessibility was automatically re-enabled.
+
+The panel uses `TYPE_ACCESSIBILITY_OVERLAY`, which depends on the accessibility connection rather than Android's standard “draw over other apps” grant. Vendor background pop-up restrictions have no common query API; the app reports window-operation failures and provides system-setting shortcuts. Periodic recovery checks run on the system's schedule, at intervals of at least 15 minutes. After a force-stop, open the app again. Shizuku hardening waits at most 35 seconds and reports a timeout if it cannot finish.
 
 ## Providers
 

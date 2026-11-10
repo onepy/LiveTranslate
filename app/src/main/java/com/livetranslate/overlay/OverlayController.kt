@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.view.Gravity
+import android.view.View
 import android.view.WindowManager
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.ComposeView
@@ -48,6 +49,8 @@ class OverlayController(
     private val service: AccessibilityService,
     private val settings: SettingsStore,
     private val actions: PanelActions,
+    /** Called with a message when the panel window cannot be shown, and with null once it shows again. */
+    private val onWindowError: (String?) -> Unit = {},
 ) {
     private val wm = service.getSystemService(WindowManager::class.java)
     private val density = service.resources.displayMetrics.density
@@ -117,20 +120,37 @@ class OverlayController(
             }
         }
         if (attached && old != Triple(params.x, params.y, params.gravity to params.width)) {
-            runCatching { wm.updateViewLayout(view, params) }
+            updatePosition()
         }
     }
 
     private fun attach() {
         if (attached) return
-        val v = view ?: createView().also { view = it }
-        attached = runCatching { wm.addView(v, params) }.isSuccess
+        val first = view ?: createView().also { view = it }
+        tryAdd(first) ?: return
+        detach()
+        val retry = createView().also { view = it }
+        val second = tryAdd(retry) ?: return
+        detach()
+        onWindowError("翻译面板无法显示：${second.javaClass.simpleName}")
+    }
+
+    /** Returns null on success. */
+    private fun tryAdd(v: ComposeView): Exception? = try {
+        wm.addView(v, params)
+        attached = true
+        onWindowError(null)
+        null
+    } catch (e: Exception) {
+        e
     }
 
     private fun detach() {
-        if (!attached) return
-        runCatching { wm.removeViewImmediate(view) }
+        val previous = view ?: return
         attached = false
+        view = null
+        runCatching { wm.removeViewImmediate(previous) }
+        previous.disposeComposition()
     }
 
     fun destroy() {
@@ -144,7 +164,16 @@ class OverlayController(
         dragging = true
         params.x += dx.roundToInt()
         params.y += dy.roundToInt()
-        runCatching { wm.updateViewLayout(view, params) }
+        if (!updatePosition()) attach()
+    }
+
+    private fun updatePosition(): Boolean = try {
+        wm.updateViewLayout(view, params)
+        true
+    } catch (error: Exception) {
+        detach()
+        onWindowError("翻译面板无法显示：${error.javaClass.simpleName}")
+        false
     }
 
     private fun onDragEnd() {
@@ -154,6 +183,18 @@ class OverlayController(
     }
 
     private fun createView() = ComposeView(service).apply {
+        addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(attachedView: View) = Unit
+
+            override fun onViewDetachedFromWindow(detachedView: View) {
+                if (view === detachedView && attached) {
+                    attached = false
+                    view = null
+                    (detachedView as ComposeView).disposeComposition()
+                    onWindowError("翻译面板无法显示：窗口已被系统移除")
+                }
+            }
+        })
         setViewTreeLifecycleOwner(lifecycleOwner)
         setViewTreeSavedStateRegistryOwner(lifecycleOwner)
         setContent {
