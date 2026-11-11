@@ -45,6 +45,8 @@ class TranslationPipeline(
     private val config: StateFlow<PipelineConfig>,
     private val translatorFor: (PipelineConfig) -> Translator,
     cacheSize: Int = 128,
+    /** Called with a label when the collecting loop throws and is restarted; never gets the text. */
+    private val onError: (String, Throwable) -> Unit = { _, _ -> },
 ) {
     private data class Request(val text: String, val cfg: PipelineConfig, val attempt: Int)
     private data class CacheKey(val text: String, val providerKey: String, val from: Lang, val to: Lang, val context: List<String>)
@@ -61,15 +63,37 @@ class TranslationPipeline(
 
     init {
         scope.launch {
-            val translationConfig = config.map { it.copy(debounceMs = 0) }.distinctUntilChanged()
-            combine(input, translationConfig, retryTick) { typed, cfg, attempt -> Triple(typed, cfg, attempt) }
-                .collectLatest { (typed, cfg, attempt) ->
-                    // Cancel an old stream immediately, before waiting for the next typing pause.
-                    _state.value = TranslationUi(source = typed.text, loading = typed.text.isNotEmpty(), providerName = cfg.providerName)
-                    if (typed.text.isNotEmpty() && !typed.immediate) delay(config.value.debounceMs)
-                    run(Request(typed.text, cfg.copy(context = typed.context, caret = typed.caret), attempt))
+            var failures = 0
+            while (true) {
+                try {
+                    collect()
+                    return@launch
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    // Losing this loop used to mean "no translation until the app is killed".
+                    failures++
+                    onError("翻译流水线出错", e)
+                    _state.value = TranslationUi(
+                        source = input.value.text,
+                        error = "翻译流程异常，已自动恢复",
+                        providerName = config.value.providerName,
+                    )
+                    delay((300L shl minOf(failures - 1, 5)).coerceAtMost(20_000L))
                 }
+            }
         }
+    }
+
+    private suspend fun collect() {
+        val translationConfig = config.map { it.copy(debounceMs = 0) }.distinctUntilChanged()
+        combine(input, translationConfig, retryTick) { typed, cfg, attempt -> Triple(typed, cfg, attempt) }
+            .collectLatest { (typed, cfg, attempt) ->
+                // Cancel an old stream immediately, before waiting for the next typing pause.
+                _state.value = TranslationUi(source = typed.text, loading = typed.text.isNotEmpty(), providerName = cfg.providerName)
+                if (typed.text.isNotEmpty() && !typed.immediate) delay(config.value.debounceMs)
+                run(Request(typed.text, cfg.copy(context = typed.context, caret = typed.caret), attempt))
+            }
     }
 
     /** [immediate] skips the typing debounce (used for explicit triggers such as long-press). */

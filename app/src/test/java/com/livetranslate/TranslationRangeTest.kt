@@ -39,4 +39,17 @@ class TranslationRangeTest {
         assertEquals(4, TranslationRanges.changedCaret("old\nx", "old\n"))
         assertEquals(2, TranslationRanges.changedCaret("abcd", "abXcd") - 1)
     }
+
+    /**
+     * The exact shape that used to blank the panel: after typing a space the caret sits one past the
+     * trimmed paragraph, so the paragraph under the caret is unchanged and must be re-used as-is.
+     */
+    @Test fun caretJustPastTrailingSpaceKeepsTheSameParagraph() {
+        val doc = "hello world "
+        val typed = TranslationRanges.select(doc, 11, 11, false)!!
+        assertEquals("hello world", typed.text)
+        val afterSpace = TranslationRanges.select(doc, 12, 12, false)!!
+        assertEquals(typed, afterSpace)
+        assertFalse("caret one past the trim is outside the replaced span", typed.containsSelection(12, 12))
+    }
 }

@@ -73,6 +73,16 @@ object ServiceLog {
         }
     }.trim()
 
+    /**
+     * Records an exception that a supervisor caught and recovered from. Only the type and the stack
+     * frames are stored: exception messages can quote the text the user typed or its translation.
+     */
+    fun recordError(label: String, e: Throwable) {
+        Log.e("LiveTranslate", "$label ${safeTrace(e)}")
+        add("$label：${e.javaClass.simpleName}", sync = true)
+        prefs?.edit()?.putString("last_error", "$label\n${safeTrace(e)}")?.apply()
+    }
+
     /** True once the "service stopped" alert has been shown for the current outage, so it does not nag. */
     var lossNotified: Boolean
         get() = prefs?.getBoolean("loss_notified", false) ?: false
@@ -80,8 +90,11 @@ object ServiceLog {
 
     val lastCrash: String get() = prefs?.getString("last_crash", "").orEmpty()
 
+    /** Last caught-and-recovered internal error: label plus exception types and frames only. */
+    val lastError: String get() = prefs?.getString("last_error", "").orEmpty()
+
     fun clear() {
-        prefs?.edit()?.remove("lines")?.remove("last_crash")?.remove("recovered_at")?.apply()
+        prefs?.edit()?.remove("lines")?.remove("last_crash")?.remove("recovered_at")?.remove("last_error")?.apply()
     }
 
     /** Device, version and timeline, for pasting into an issue. */
@@ -96,6 +109,11 @@ object ServiceLog {
             appendLine()
             appendLine("上次崩溃：")
             append(lastCrash)
+        }
+        if (lastError.isNotBlank()) {
+            appendLine()
+            appendLine("最近自动恢复的错误：")
+            append(lastError)
         }
     }
 }

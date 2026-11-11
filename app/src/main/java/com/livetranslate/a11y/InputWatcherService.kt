@@ -19,6 +19,7 @@ import com.livetranslate.translate.TranslationPipeline
 import com.livetranslate.translate.toPipelineConfig
 import com.livetranslate.tts.TtsManager
 import com.livetranslate.ui.MainActivity
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -81,33 +82,93 @@ class InputWatcherService : AccessibilityService(), PanelActions {
         nodeDiagnostic = runCatching { NodeDiagnostic(this).also { it.register() } }.getOrNull()
         val config = settings.flow.map { it.toPipelineConfig() }
             .stateIn(scope, SharingStarted.Eagerly, settings.value.toPipelineConfig())
-        pipeline = TranslationPipeline(scope, config, translatorFor = { cfg -> Providers.create(settings.value.providerId, settings.value, cfg.context, cfg.caret) })
+        pipeline = TranslationPipeline(scope, config,
+            translatorFor = { cfg -> Providers.create(settings.value.providerId, settings.value, cfg.context, cfg.caret) },
+            onError = { label, e -> ServiceLog.recordError(label, e) },
+        )
         tts = TtsManager(this, scope, settings)
         overlay = newOverlay()
 
-        scope.launch {
+        scope.collectForever("翻译面板渲染") {
             combine(focused, pipeline.state, settings.flow) { f, st, s -> Triple(f, st, s) }
                 .collect { (f, st, s) ->
-                    runCatching { overlay.render(f, st, s) }.onFailure { reportFault("翻译面板出错：${it.javaClass.simpleName}") }
+                    try {
+                        overlay.render(f, st, s)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Throwable) {
+                        ServiceLog.recordError("翻译面板渲染出错", e)
+                        reportFault("翻译面板出错：${e.javaClass.simpleName}")
+                    }
                 }
         }
-        scope.launch {
+        scope.collectForever("设置变化处理") {
             settings.flow.map { listOf(it.enabled, it.appScope, it.whitelist, it.triggerMode, it.shortContext, it.providerId, it.sourceLang, it.targetLang, it.privacy) }
                 .distinctUntilChanged().drop(1)
-                .collect {
-                    shortContext.clear()
-                    draftContext = emptyList()
-                    targetRange = null
-                    pipeline.submit("")
-                    recheckFocus()
-                }
+                .collect { refreshAfterSettingsChange() }
         }
-        scope.launch {
+        scope.collectForever("前台通知更新") {
             settings.flow.map { it.keepAliveNotification to it.enabled }
                 .distinctUntilChanged()
                 .collect { (keep, enabled) -> updateForeground(keep, enabled) }
         }
+        scope.launch {
+            while (true) {
+                delay(GUARD_INTERVAL_MS)
+                try {
+                    overlay.guard()
+                    // Self-heal: without a tracked input the panel can never come back on its own.
+                    if (focused.value == null && settings.value.enabled) recheckFocus()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    ServiceLog.recordError("面板守护出错", e)
+                }
+            }
+        }
         recheckFocus()
+    }
+
+    /**
+     * A settings change (provider switch, ⇄, opacity…) used to blank the panel and then lose the
+     * input for good. Keep what is on screen: re-run the translation of the current range instead.
+     */
+    private fun refreshAfterSettingsChange() {
+        shortContext.clear()
+        draftContext = emptyList()
+        val range = targetRange
+        val current = focused.value
+        if (range != null && current != null && current.text == range.snapshot) {
+            val contextEnabled = settings.value.shortContext && Providers.supportsContext(settings.value.providerId)
+            pipeline.submit(range.text, context = if (contextEnabled) draftContext else emptyList())
+        } else {
+            targetRange = null
+            pipeline.submit("")
+        }
+        recheckFocus()
+    }
+
+    /**
+     * Runs [block] until it completes, restarting it with a growing delay when it throws. A single
+     * exception inside a long-lived collector used to stop the panel and the translation forever
+     * (the "must kill the app" symptom); now it only costs one backoff.
+     */
+    private fun CoroutineScope.collectForever(name: String, block: suspend () -> Unit) {
+        launch {
+            var failures = 0
+            while (true) {
+                try {
+                    block()
+                    return@launch
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    failures++
+                    ServiceLog.recordError("$name 已中断，正在恢复", e)
+                    delay((500L shl minOf(failures - 1, 5)).coerceAtMost(30_000L))
+                }
+            }
+        }
     }
 
     private fun newOverlay() = OverlayController(this, settings, this) { error ->
@@ -229,8 +290,10 @@ class InputWatcherService : AccessibilityService(), PanelActions {
         // Freeze at the first actual text edit, not after debounce or long-press.
         if (textChanged && contextEnabled && text != suppressedText) draftContext = shortContext.begin()
         val previous = focused.value
-        val sameEditor = previous != null && previous.pkg == pkg && previous.node == node &&
-            previous.node.windowId == node.windowId
+        // Same field, not the same node object: some editors hand out a new AccessibilityNodeInfo
+        // for every keystroke, and treating that as "a different input box" blanked the panel on
+        // every character.
+        val sameEditor = previous != null && previous.pkg == pkg && previous.node.windowId == node.windowId
         val changed = textChanged || (sameEditor && previous!!.text != text)
         if (changed && contextEnabled && text != suppressedText) draftContext = shortContext.begin()
         if (!sameEditor) {
@@ -250,10 +313,24 @@ class InputWatcherService : AccessibilityService(), PanelActions {
         }
         if (!shouldTranslate) {
             val target = targetRange
-            if (target != null && (target.snapshot != text ||
-                    (selectionChanged && !target.containsSelection(node.textSelectionStart, node.textSelectionEnd)))) {
+            if (target != null && target.snapshot != text) {
                 targetRange = null
                 pipeline.submit("")
+                return
+            }
+            // A caret step alone must never clear the panel. The paragraph range is trimmed, so the
+            // caret sits one past it after every space: that used to hide the panel on each word
+            // boundary, and for good when the sentence ended on a space.
+            if (selectionChanged && target != null &&
+                !target.containsSelection(node.textSelectionStart, node.textSelectionEnd)) {
+                val start = node.textSelectionStart
+                val end = node.textSelectionEnd
+                val moved = TranslationRanges.select(text, start, end, explicit = false)
+                if (moved != null && moved != target) {
+                    targetRange = moved
+                    val caret = if (start >= moved.start) (start - moved.start).coerceAtMost(moved.text.length) else -1
+                    pipeline.submit(moved.text, context = if (contextEnabled) draftContext else emptyList(), caret = caret)
+                }
             }
             return
         }
@@ -277,19 +354,36 @@ class InputWatcherService : AccessibilityService(), PanelActions {
         pipeline.submit("")
     }
 
+    /**
+     * Re-reads the screen and decides whether the tracked input is still valid. Never clears the
+     * tracked input just because the screen could not be read right now (which happens on EMUI as
+     * soon as the panel has been touched): only a positive sighting of another window clears it.
+     */
     private fun recheckFocus() {
         val s = settings.value
         if (!s.enabled) {
             clearFocus()
             return
         }
-        val node = runCatching { rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) }.getOrNull()
+        val root = runCatching { rootInActiveWindow }.getOrNull()
+        val rootPackage = root?.packageName?.toString()
+        val node = runCatching { root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) }.getOrNull()
         val pkg = node?.packageName?.toString()
-        if (!InputNodes.isUsable(node) || pkg == null || pkg == packageName || !s.allows(pkg)) {
-            clearFocus()
-            return
+        val usable = InputNodes.isUsable(node) && pkg != null
+        val previous = focused.value
+        val trackedAlive = previous != null && runCatching { previous.node.refresh() && previous.node.isFocused }.getOrDefault(false)
+        when (FocusRules.decide(
+            rootPackage = rootPackage,
+            nodeUsable = usable,
+            allowed = pkg != null && s.allows(pkg),
+            ownPackage = packageName,
+            trackedPackage = previous?.pkg,
+            trackedAlive = trackedAlive,
+        )) {
+            FocusRules.Decision.KEEP -> Unit
+            FocusRules.Decision.CLEAR -> clearFocus()
+            FocusRules.Decision.USE -> onInput(node!!, pkg!!)
         }
-        onInput(node!!, pkg)
     }
 
     /** Content changes are very frequent (e.g. keyboard animation); refresh the input box at most every ~120ms. */
@@ -411,6 +505,9 @@ class InputWatcherService : AccessibilityService(), PanelActions {
     }
 
     companion object {
+        /** How often the panel window and the tracked input are re-checked for self-healing. */
+        private const val GUARD_INTERVAL_MS = 3000L
+
         private const val TAG = "InputWatcher"
         private val running = MutableStateFlow(false)
         val isRunning: StateFlow<Boolean> = running
